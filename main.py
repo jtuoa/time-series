@@ -4,7 +4,7 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import pandas as pd
 from utils import *
-import algorithms as algs
+from algorithms import *
 import os
 import argparse
 from sklearn.model_selection import KFold
@@ -52,7 +52,7 @@ def kfsplit(x, kf_dictSelect):
 def main():
 	#TODO: preprocess data
 	#preprocess data
-	'''data = data_preprocess("WoundInf_Train_Tests.tsv", "WoundInf_Train_Labels.tsv", ntopTests=50, nYob=12, ntestRel_useRange=True)
+	data = data_preprocess("WoundInf_Train_Tests.tsv", "WoundInf_Train_Labels.tsv", ntopTests=50, nYob=12, ntestRel_useRange=True)
 	data.load_data()
 	data.keep_ntopTests()
 	data.combine_datasets()
@@ -62,37 +62,26 @@ def main():
 	data.create_weightVec_newDataCol()
 	data.encode_gender()
 	data.create_yobGroup()
-	xy, testName = data.result()
+	data.integer_encode_testName()	
+	data.normalize_test()
+	#pdb.set_trace()
+    #[pid, time, time_weight, test, numAnswer, gender, 9yob, infection]
+	xy, normc = data.result()
 	print("xy shape: ", xy.shape)
-	np.save('testName.npy', testName)'''
-	
-	#snapshot preprocess
-	'''s = snapShot_preprocess(xy)
-	s.snapshot_data()
-	s.snapshot_plot()'''
-	
-	#impute preprocess
-	'''impute = impute_preprocess(xy, nSamples = 20)
-	data_impute = impute.impute_data()
-	np.save('forward_impute_50.npy', data_impute) #save file'''
-	
-	#finetune preprocess
-	'''pdb.set_trace()
-	#[pid, time, time_weight, test, numAnswer, gender, yob, infection]
-	data_impute = np.load(os.path.join(args.path,'forward_impute_50.npy'))
-	testName = np.load(os.path.join(args.path,'testName.npy'))
-	data2 = more_preprocess(data_impute, testName)
-	data2.get_test_idx()
-	data_complete = data2.normalize_test() #(PID, t_uTest, samples, cols)
 
+	#impute preprocess
 	pdb.set_trace()
-	np.save('forward_impute_complete_50.npy', data_complete) #50 samples'''
+	impute = impute_preprocess(xy, normc, nSamples = 20)
+	data_impute = impute.impute_data()
+	np.save('Fimpute_50tests_20samples.npy', data_impute) #save file
+	#np.save('PCAimpute_50tests_20samples.npy', data_impute)
 	
 	#TODO: k-fold split
 	pdb.set_trace()
 	#(787, 50, 20, 16) [PID, test_type, nSamples, col]
 	#col = [PID, date, weight, test_type, result, gender, yob1, yob2, yob3, yob4, yob5, yob6, yob7, yob8, yob9, infection]
-	data = np.load(os.path.join(args.path,'forward_impute_complete_50.npy'))
+	data = np.load(os.path.join(args.path,'Fimpute_50tests_20samples.npy'))
+	#data = np.load(os.path.join(args.path,'PCAimpute_50tests_20samples.npy'))
 	splits = kfsplit(data, 1) #1 = don't generate kfsplit
 	
 	#TODO: test algorithm
@@ -101,13 +90,25 @@ def main():
 	x = data[:,:,:,0:15] #(787, 50, 20, 15) 
 	yd = data[:,:,:,15] #(787,50,20), y[0] = (50,20)
 	y = yd[:,0,0] #(787,) per PID
+	algs = MLP()
 	for split, (_,(train_index, test_index)) in enumerate(splits.items()):
-		trainx, trainy = x[train_index,...], y[train_index]
+		trainx, trainy = x[train_index,...], y[train_index] #trainx (708, 50, 20, 15)
 		testx, testy = x[test_index,...], y[test_index]
+		pdb.set_trace()
 		algs.train(trainx, trainy, testx, testy)
 		ypredict = algs.predict(testx)
+		
+		#grid search on one kfold: do after finalize the number of layers
+		algs.grid_search(trainx, trainy)
+		pdb.set_trace()
+		
 		cur_accuracy = float(sum(ypredict==testy))/testy.shape[0]
 		accuracies.append(cur_accuracy)	
+
+	#snapshot preprocess
+	'''s = snapShot(xy)
+	s.snapshot_data()
+	s.snapshot_plot()'''
 	
 	#TODO: Evaluation
 	
