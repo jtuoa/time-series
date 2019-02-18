@@ -1,100 +1,141 @@
 import numpy as np
+import matplotlib as mpl
+mpl.use('Agg')
 import pandas as pd
 import pdb
 from utils import *
-from tensorflow.keras.utils import plot_model
-from tensorflow.keras.layers import Dense, Activation, Input, Embedding, concatenate
-from tensorflow.keras.models import Model
+from tensorflow.keras.layers import Dense, Dropout, MaxPooling2D, Flatten, Conv2D
+from tensorflow.keras.models import Sequential
+from sklearn.linear_model import LogisticRegression
+from sklearn.utils.class_weight import compute_class_weight
+import tensorflow.keras.backend as K
 import tensorflow as tf
+from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.callbacks import Callback
+from sklearn.metrics import f1_score, precision_score, recall_score
 
-'''import os
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3' #dissable warnings and debug info from TF
-config = tf.ConfigProto()
-config.gpu_options.allow_growth = True #dynamically grow the memory used on GPU
-sess = tf.Session(config=config)
-K.set_session(sess) #set this tf session as default session for keras'''
+#memory calc:
+#3000*128*64*64*2(weight/bias)*4(each) /1024/1024/1024 = 11.72 G
+#256*64*32, 512*64*16, 512*32*32
+
+#GRU-D reference
+#https://github.com/zhiyongc/GRU-D/blob/master/main.py
+#https://github.com/Han-JD/GRU-D
+
+def sensitivity(y_true, y_pred): #TP/P 1=good
+	true_positives = K.sum(K.round(K.clip(y_true * y_pred, 0, 1)))
+	possible_positives = K.sum(K.round(K.clip(y_true, 0, 1)))
+	return true_positives / (possible_positives + K.epsilon())
+
+def specificity(y_true, y_pred): #TN/N (recall) 1=good
+	true_negatives = K.sum(K.round(K.clip((1-y_true) * (1-y_pred), 0, 1)))
+	possible_negatives = K.sum(K.round(K.clip(1-y_true, 0, 1)))
+	return true_negatives / (possible_negatives + K.epsilon())
+
+def precision(y_true, y_pred): #TP/TP+FP 1=good
+	true_positives = K.sum(K.round(K.clip(y_true * y_pred, 0, 1)))
+	predicted_positives = K.sum(K.round(K.clip(y_pred,0, 1)))
+	return true_positives / (predicted_positives + K.epsilon())
+
+def kappa(y_true, y_pred):
+	#OA=TN+TP/all
+	#EA=((TN+FN)*(TN+FP)/all)+((TP+FN)*(TP+FP)/all)/all
+	#ka=(OA-EA)/(1-EA)
+	true_negatives = K.sum(K.round(K.clip((1-y_true) * (1-y_pred), 0, 1)))
+	true_positives = K.sum(K.round(K.clip(y_true * y_pred, 0, 1)))
+	false_negatives = K.sum(K.round(K.clip((y_true) * (1-y_pred), 0, 1)))
+	false_positives = K.sum(K.round(K.clip((1-y_true) * (y_pred), 0, 1)))
+	_all = true_negatives + true_positives + false_negatives + false_positives
+	observe_acc = (true_negatives + true_positives)/_all
+	exp_acc1 = ((true_negatives+false_negatives)*(true_negatives+false_positives)/_all)
+	exp_acc2 = ((true_positives+false_negatives)*(true_positives+false_positives)/_all)
+	exp_acc = (exp_acc1 + exp_acc2)/_all
+	return (observe_acc - exp_acc)/(1-exp_acc)
+	
+
+class CNN:
+	"""
+	Convolutional neural network
+	"""
+	def __init__(self, Xtrain):
+		self.params={'nbatch':32, 'nepoch':40}
+		
+		self.model = Sequential()
+		self.model.add(Conv2D(32, (3, 3), input_shape=(Xtrain.shape[0], Xtrain.shape[1],1), activation='relu'))
+		self.model.add(MaxPooling2D(pool_size = (2, 2)))
+		self.model.add(Conv2D(32, (3, 3), activation='relu'))
+		self.model.add(MaxPooling2D(pool_size = (2, 2)))
+		self.model.add(Flatten())
+		self.model.add(Dense(units=128, activation='relu'))
+		self.model.add(Dense(units=2, activation='softmax'))
+		
+		opt = Adam(lr=0.001)
+		self.model.compile(optimizer=opt, loss='categorical_crossentropy', metrics=['accuracy', sensitivity, specificity, precision, kappa])
+		
+	def train(self, xtrain, ytrain):
+		self.model.fit(xtrain, ytrain, epochs=self.params['nepoch'], batch_size=self.params['nbatch'], validation_split = 0.2, class_weight=self.class_weights, verbose=2)	
+	
+	def predict(self, xtest):
+		ypred = self.model.predict(xtest)
+		ypred = ypred.argmax(1)
+		return ypred
 
 
 class MLP:
 	"""
-	Multilayer preceptron
+	Multilayer perceptron
 	"""
-	def __init__(self):
-		self.params={'nbatch':32, 'nepoch':20, 'nTest':50, 'nSamples':20}
+	def __init__(self, Xtrain, ytrain):
+		self.params={'nbatch':32, 'nepoch':40}
 		
-	def train(self, xtrain, ytrain, xvalid, yvalid):
+		#make classifier aware of imbalance data by incorp weight in cost fxn
+		#self.class_weights = {0:0.4,1:0.6} #sum to 1 else change reg param
+		self.class_weights = {0:1, 1:4.5} #class 1 3.65 times weight of class 0
+		#yints = ytrain.reshape(ytrain.shape[0],)
+		#self.class_weights = compute_class_weight(class_weight='balanced', classes=np.unique(yints), y=yints)
+		#self.class_weight_dict = dict(enumerate(class_weights))
 		
-		test_input = Input(shape=(xtrain.shape[0], self.params['nTest'], self.params['nSamples'], )) #test_type
-		test_auxin = Input(shape=(xtrain.shape[0], self.params['nTest'], self.params['nSamples'], 3)) #date, weight, result
-		attr_input = Input(shape=(xtrain.shape[0], self.params['nTest'], self.params['nSamples'], 10)) #gender, yob
-				
-		x = Embedding(input_dim=self.params['nTest'], output_dim=32)(test_input)
-		x = concatenate([x, test_auxin, attr_input])
+		#To generate the same weights initialization for all methods, keras uses numpy and tf as backend so we need to set tf's seed as well
+		from tensorflow import set_random_seed
+		np.random.seed(42)
+		set_random_seed(2)
 		
-		x = Dense(512, activation='relu')(x) #num layers
-		x = Dense(512, activation='relu')(x)
-		x = Dense(512, activation='relu')(x)		
-		has_infection = Dense(1, activation="sigmoid")(x)		
-		self.model = Model(inputs=[test_input, test_auxin, attr_input], outputs=has_infection)
+		self.model = Sequential()
+		self.model.add(Dense(512, activation='relu', input_dim=Xtrain.shape[1]))
+		self.model.add(Dropout(0.5))
+		#self.model.add(Dense(64, activation='relu'))
+		#self.model.add(Dropout(0.5))
+		#self.model.add(Dense(16, activation='relu'))
+		#self.model.add(Dropout(0.5))
+		self.model.add(Dense(2, activation='softmax'))
 		
-		self.model.compile(optimizer='adam', loss="binary_crossentropy")
-		test_inputX = xtrain[:,:,:,3]
-		test_auxinX = xtrain[:,:,:,[1,2,4]]
-		attr_inputX = xtrain[:,:,:,5:15]
-		#can't use x=xtrain error: expect to see 3 arrays
-		#can't use test_inputX=xtrain[:,:,:,3:4] err: expect(708,50,20) got (50,20,1)
-		#x=[] err: input_q to have 4 dim got (708,50,20)		
-		self.model.fit(x=[test_inputX, test_auxinX, attr_inputX], y=ytrain, epochs=self.params['nepoch'], batch_size=self.params['nbatch'], verbose=0, validation_data=(xvalid, yvalid))
+		opt = Adam(lr=0.01)
+		#dont use accuracy metric
+		self.model.compile(optimizer=opt, loss='categorical_crossentropy', metrics=['accuracy', sensitivity, specificity, precision, kappa])
 		
-		#self.model.save("/home/juiwen/Documents/CMPUT659/mp1.h5")
-		#print(self.model.summary())
-		#plot_model(self.model, to_file='multilayer_perceptron_graph.png')
-	
-	def grid_search(self, X, Y):
-		#grid search parameters
-		batch_size = [16, 32, 64]
-		epochs = [10, 20, 30]
-		optimizer = ['SGD', 'RMSprop', 'Adam']
-		param_grid = dict(batch_size = batch_size, epochs = epochs, optimizer = optimizer)
-		grid = GridSearchCV(estimator = self.model, param_grid = param_grid, n_jobs=-1)
-		grid_result = grid.fit(X,Y)
-		print("Best: %f using %s" % (grid_result.best_score_, grid_result.best_params_))
-		means = grid_result.cv_results_['mean_test_score']
-		stds = grid_result.cv_results_['std_test_score']
-		params = grid_result.cv_results_['params']
-		for mean, std, param in zip(means, stds, params):
-			print("%f(%f) with : %r" % (mean, stdev, param))
-	
+		
+	def train(self, xtrain, ytrain):		
+		history = self.model.fit(xtrain, ytrain, epochs=self.params['nepoch'], batch_size=self.params['nbatch'], validation_split = 0.2, class_weight=self.class_weights, verbose=2)	
+		#history = self.model.fit(xtrain, ytrain, epochs=self.params['nepoch'], batch_size=self.params['nbatch'], validation_data = (xval, yval), class_weight=self.class_weights, verbose=2)
+		#self.model.save("/home/juiwen/Documents/CMPUT659/LOCF_classweight_model.h5")
+		return history
+
 	def predict(self, xtest):
-		ytest = self.model.predict(xtest)
-		return ytest
+		ypred = self.model.predict(xtest)
+		ypred = ypred.argmax(1)
+		return ypred
 
 class LR:
 	"""
 	Logistic regression
 	"""
 	def __init__(self):
-		self.params={'nbatch':32, 'nepoch':20, 'nTest':50}
+		self.model = LogisticRegression(random_state=0)
 		
-	def train(self, xtrain, ytrain, xvalid, yvalid):
-		
-		test_input = Input(shape=(self.params['nTest'],)) #Input1: test_type
-		test_auxin = Input(shape=(self.params['nTest'],3)) #Input2: date, weight, result
-		attr_input = Input(shape=(2,)) #Input3: gender, yob
-		
-		x = Embedding(input_dim=self.params['nTest'], output_dim=32)(test_input)
-		x = concatenate([x, test_auxin, attr_input]) #merge input models
-		
-		has_infection = Dense(1, activation="sigmoid")(x)		
-		self.model = Model(input=[test_input, test_auxin, attr_input], output=has_infection)
-		
-		self.model.compile(optimizer="adam", loss="binary_crossentropy")		
-		self.model.fit(x=xtrain, y=ytrain, epochs=self.params['nepoch'], batch_size=self.params['nbatch'], verbose=0, validation_data=(xvalid, yvalid))
-		
+	def train(self, xtrain, ytrain):
+		self.model.fit(xtrain, ytrain)		
 		#self.model.save("/home/juiwen/Documents/CMPUT659/mp1.h5")
-		#print(self.model.summary())
-		#plot_model(self.model, to_file='multilayer_perceptron_graph.png')
-		
+		#print(self.model.summary())	
 	
 	def predict(self, xtest):
 		ytest = self.model.predict(xtest)

@@ -1,19 +1,17 @@
 import numpy as np
-import matplotlib as mpl
-mpl.use('Agg')
-import matplotlib.pyplot as plt
 import pandas as pd
 from operator import itemgetter
-import datetime
-from sklearn.preprocessing import LabelEncoder
+from datetime import datetime
+from sklearn.preprocessing import LabelEncoder, StandardScaler
+from sklearn.model_selection import train_test_split
 from tensorflow.keras.utils import to_categorical
 #from hypertools.hypertools.tools.reduce import reduce as reducer
-from ppca.ppca import PPCA
-import copy
+#from ppca.ppca import PPCA
 import pdb
+import copy
 
 DAY_MIN = 1440
-HR_MIN = 60
+S_MIN = 60
 REL_DAYRANGE = 60 #day prior knowledge
 
 
@@ -25,135 +23,227 @@ def check_unique(arr):
 	return uc_table
 
 
+class prepareData_MLP:
+	def __init__(self, data):
+		#old x: (856, 50, 60, 7) [PID, test_type, nSamples, col]
+    	#['PID', 'TestType', 'NumAnswer', 'surgery_test_date', 'Gender_encode0', 'Gender_encode1', 'Infection']
+		self.data = np.array(data)
+
+	def xy_output(self, x_simple, y_simple, is_3D):
+		#pdb.set_trace()
+		#stratify: preserves 21% ones and 79% zeros in y_simple
+		Xtrain, Xtest, ytrain, ytest = train_test_split(x_simple, y_simple, test_size=0.2, random_state=0, stratify=y_simple) 
+        
+		sc_X = StandardScaler() #standardize data
+		if is_3D:
+			for p in range(0, Xtrain.shape[0]):
+				Xtrain[p] = sc_X.fit_transform(Xtrain[p])
+			for p in range(0, Xtest.shape[0]):
+				Xtest[p] = sc_X.fit_transform(Xtest[p])
+		else:
+			Xtrain = sc_X.fit_transform(Xtrain)
+			Xtest = sc_X.transform(Xtest)
+        
+		return Xtrain, ytrain, Xtest, ytest  
+	   
+	def xy_simple(self):
+		#new x_simple: one large array, flatten
+		#['test0 test1 test2..'] NO gender
+		nr = self.data.shape[0] #pid
+		nc = self.data.shape[1] * self.data.shape[2] #test/time
+		x_simple = np.zeros((nr, nc))
+		y_simple = np.zeros((nr,1))
+		i = 0 #thru pid
+		for r in range(0,nr):
+			print("pid", i)
+			j = 0 #thru test
+			k = 0 #thru time
+			for c in range(0,nc):
+				x_simple[r,c] = self.data[i][j][k,2] #r0/t0..r0/t59, r1/t0			
+				print("pid/test/time for row/col", i, j, k, "|", r, c)
+				if k == (self.data.shape[2]-1): #fill all time per test
+					j += 1 #next test
+					k = 0 #reset time
+				else:                    
+					k += 1 #each col = next time same test    
+			#pdb.set_trace()			           
+			y_simple[r] = self.data[i][0][0,-1] #infection per pid
+			i += 1 #each row = next pid
+            
+		pdb.set_trace()
+		print(x_simple.shape, y_simple.shape)		
+		Xtrain, ytrain, Xtest, ytest = self.xy_output(x_simple, y_simple, 0)
+		return Xtrain, ytrain, Xtest, ytest
+
+	def conv_xy_simple(self):
+		#new conv_xy_simple (Npid, tsample, tests)
+		nr = self.data.shape[2] #tsample
+		nc = self.data.shape[1] #tests
+		npid = self.data.shape[0]
+		x_simple = np.zeros((npid, nr, nc))
+		y_simple = np.zeros((npid,1))
+		for p in range(0, npid):
+			for c in range(0, nc):
+				x_simple[p][:,c] = self.data[p][c][:,2]
+			y_simple[p] = self.data[p][0][0,-1]
+		
+		print(x_simple.shape, y_simple.shape)
+		Xtrain, ytrain, Xtest, ytest = self.xy_output(x_simple, y_simple, 1) #1=3D arr
+		return Xtrain, ytrain, Xtest, ytest
+		
+		
+		
 class impute_preprocess:
 	"""
 	pre-process for impute algorithms: Forward, PCA
 	"""
-	def __init__(self, xy, normc, nSamples):
+	def __init__(self, xy, rel2, nSamples, method):
 		self.xy = np.array(xy)
 		self.nSamples = nSamples
-		self.normc = normc
+		self.rel2 = rel2 #min
+		self.method = method
 		
 	#impute data prep
+    #['PID', 'TestType', 'NumAnswer', 'surgery_test_date', 'Gender_encode0', 'Gender_encode1', 'Infection']
 	def impute_data(self):
-		p = check_unique(self.xy[:,0])
+		p = check_unique(self.xy[:,0]) #pid
 		p_arr = np.array(p)
 		p_uTest = p_arr[:,0]
 		
-		t = check_unique(self.xy[:,3])
+		t = check_unique(self.xy[:,1]) #testType
 		t_arr = np.array(t)
 		t_uTest = t_arr[:,0]
 		
-		t_window = np.linspace(-REL_DAYRANGE*DAY_MIN, REL_DAYRANGE*DAY_MIN, self.nSamples)
+		rel1 = REL_DAYRANGE * DAY_MIN #pos=before surgery 
+		t_window = np.linspace(self.rel2, rel1, self.nSamples)
 		t_window = sorted(t_window, reverse=True)
 		
-		PID_allTest = []	
-		#for each PID
+		PID_allTest = []
+		check_total_rows = 0
+        #for each PID
 		for r1, elem1 in enumerate(p_uTest):
 			allTest = []
-			#search for all the time testA is done for this pid = match
+			#search for all testA for this pid = match
 			for r2, elem2 in enumerate(t_uTest):	
-				match = [x for x in list(self.xy) if x[3] == elem2 and x[0] == elem1]
-				match_arr = np.array(sorted(match, key=itemgetter(1), reverse=True))
-				
+				match = [x for x in list(self.xy) if x[1] == elem2 and x[0] == elem1]
+				check_total_rows += len(match)
 				#pdb.set_trace()
 				#Empty: there is no testA for this pid
-				if match_arr.size == 0:
+				if len(match) == 0:
 					#pdb.set_trace()
-					mean = self.mean_perTest(elem2) #find mean of across all pid
-					xy_col = self.xy.shape[1]
-					non_impute = self.create_nonImpute_list(elem1, elem2, t_window, mean, xy_col)
-					#(t_uTest size, samples, col)
+					#find mean all pid based on inf
+					pid_inf_idx = np.where(self.xy[:,0] == elem1)[0][0] #inf same for all test
+					pid_inf = self.xy[pid_inf_idx,-1]
+					mean = self.mean_perTest(elem2, pid_inf) 
+					non_impute = self.create_nonImpute_list(pid_inf_idx, elem1, elem2, t_window, mean)
+					#(typeTests, Nsamples, attributes)
 					allTest.append(non_impute)
 				else:					
-					#IMPUTE METHOD CHANGE HERE!!!
-					#pdb.set_trace()                    
-					forward_impute = self.impute_forward_bTest(match_arr, t_window)
-					#pca_impute = self.impute_PCA_bTest(match_arr, t_window)		
-					#(t_uTest size, samples, col)
-					allTest.append(forward_impute)
+					#pdb.set_trace() 
+					if self.method == 'LOCF':                   
+						LOCF_impute = self.impute_LOCF_bTest(match, t_window)
+						#(typeTests, Nsamples, attributes)
+						allTest.append(LOCF_impute)
+					elif self.method == 'NN':
+						NN_impute = self.impute_NN_bTest(match, t_window)
+						allTest.append(NN_impute)
+					elif self.method == 'PCA':
+						PCA_impute = self.impute_PCA_bTest(match, t_window)	
+						allTest.append(PCA_impute)
 				
 			#pdb.set_trace()
-			#(PID, t_uTest size, samples, col)
+			#(PID, typeTests, Nsamples, attributes)
 			PID_allTest.append(allTest)
 			check = np.array(PID_allTest)
+			print("                          ")
 			print(check.shape)
-		#pdb.set_trace() 
+			print("                          ")
+		#pdb.set_trace()
+		check_unique_pid = check_unique(self.xy[:,0])
+		print("total rows & unique pid:", check_total_rows, check_unique_pid)
 		return PID_allTest
-	
-	#impute mean: take avg across the time frame if none then use default
-	
-	#impute PCA
-	def impute_PCA_bTest(self, arr, t_window):
-		old_arr = copy.deepcopy(arr)
-		#create nan list
-		slist_pca_impute = []
-		for i in range(len(t_window)):
-			arr[0][1] = t_window[i] #time in col 1			
-			arr[0][4] = np.nan #result in col 4
-			slist_pca_impute.append(list(arr[0]))
-		pdb.set_trace()
-		#find number closest to sample point and fill ONCE		
-		for arow, aval in enumerate(old_arr[:,1]):
-			minVal = [x - aval for x in t_window]
-			minIdx = np.argmin(abs(np.array(minVal)))
-			stmp = list(old_arr[arow,:])
-			stmp[1] = t_window[minIdx]
-			#insert stmp into slist at minIdx
-			slist_pca_impute[minIdx] = stmp
-		
-		#implement PCA on nan
-		#if only 0 and nan in col 4 then can't PCA
-		'''sarr_pca_impute = np.array(slist_pca_impute)
-		det = sarr_pca_impute[:,4]
-		inds = [i for i,n in enumerate(det) if str(n) == "nan" or str(n) == "0.0"]
-		if len(inds) != len(slist_pca_impute): #can PCA
-			data_r = hyp.reduce(sarr_pca_impute, ndims=3)'''
-		#just PCA regardless of only 0 and nan in col 4
-		#data_r = reducer(sarr_pca_impute, ndims=3)
-		pca = PPCA()
-		pca.fit(sarr_pca_impute, 3)
-		
-		return list(data_r) #row	
 
 	#Impute forward: find time closest to sample point
-	def impute_forward_bTest(self, arr, t_window):		
+	#LOCF = last observation carried forward
+    #['PID', 'TestType', 'NumAnswer', 'surgery_test_date', 'Gender_encode0', 'Gender_encode1', 'Infection']
+	def impute_LOCF_bTest(self, arr, t_window):	
+		arr = np.array(sorted(arr, key=itemgetter(3), reverse=True)) #sort by date
+		t_window = np.array(t_window)
 		slist_forward_impute = []
+		for arow, aval in enumerate(arr[:,3]):
+			if arow == 0: 
+				idx = np.where((t_window >= aval))
+				for i in range(0, len(idx[0])):
+					stmp = list(arr[arow,:])
+					stmp[3] = t_window[idx[0][i]]
+					slist_forward_impute.append(stmp)
+			else:
+				idx = np.where((t_window >= aval) & (t_window < arr[arow-1,3]))            
+				for i in range(0, len(idx[0])):
+					stmp = list(arr[arow-1,:]) #fill prev value
+					stmp[3] = t_window[idx[0][i]]
+					slist_forward_impute.append(stmp)
+            
+		#pdb.set_trace()		
+		#if list unfilled, fill rest with last val
+		listLen = len(slist_forward_impute)
+		#print("slist Length ", listLen)   
+		if listLen != len(t_window):
+			#print("Enter fill function")          
+			for i in range(listLen, len(t_window)):
+				stmp = copy.deepcopy(list(arr[arow]))
+				stmp[3] = t_window[i]
+				slist_forward_impute.append(stmp)
+		#print("fill slist Length ", len(slist_forward_impute))
+		assert len(slist_forward_impute) == len(t_window), "Error: incorrect list length"
+	
+		#pdb.set_trace()
+		return slist_forward_impute
+
+	#Impute NN: nearest value
+	def impute_NN_bTest(self, arr, t_window):
+		arr = np.array(sorted(arr, key=itemgetter(3), reverse=True))
+		#print("input arr", arr)
+		slist_forward_impute = []
+		#pdb.set_trace()
 		for tval in t_window:
 			realClosestTime = 100e9
-			for arow, aval in enumerate(arr[:,1]):
+			for arow, aval in enumerate(arr[:,3]):
 				closestTimeCheck = abs(tval - aval)
 				if closestTimeCheck < realClosestTime:
 					realClosestTime = closestTimeCheck
 					realIdx = arow
+			#pdb.set_trace()
+			#print("sample, arrIdx", tval, arr[realIdx,:]) 
 			stmp = list(arr[realIdx,:])
-			stmp[1] = tval
+			stmp[3] = tval
 			slist_forward_impute.append(stmp)
+		#pdb.set_trace()
 		return slist_forward_impute
-	
+		
     #Fill by: mean over all pid for pid with no measurements in testA
-	def mean_perTest(self, test):
-		#compute mean across all patients for test
-		match = [x for x in list(self.xy) if x[3] == test]
+	def mean_perTest(self, test, has_inf):
+		#compute mean across all patients for test based on pid infection
+		match = [x for x in list(self.xy) if x[1] == test and x[-1] == has_inf]
 		match_arr = np.array(match)
-		mean = np.sum(match_arr[:,4])/match_arr.shape[0]
+		if len(match_arr) == 0:
+			mean = 0
+		else:
+			mean = np.sum(match_arr[:,2])/match_arr.shape[0]
 		return mean
-			
+
 	#Create list: for PID that dont have any measurement in testA
-    #[pid, time, time_weight, test, numAnswer, gender, 9yob, infection]
-	def create_nonImpute_list(self, pid, test, t_window, mean, xy_col):
-		arr = np.empty([self.nSamples, xy_col], dtype=object)
+    #['PID', 'TestType', 'NumAnswer', 'surgery_test_date', 'Gender_encode0', 'Gender_encode1', 'Infection']
+	def create_nonImpute_list(self, pid_idx, pid, test, t_window, mean):
+		arr = np.empty([self.nSamples, self.xy.shape[1]], dtype=object)
 		arr[:,0].fill(pid)
-		arr[:,1] = t_window
-		arr[:,2] = abs(1/arr[:,1]/self.normc)
-		arr[:,3].fill(test)
-		arr[:,4].fill(mean)
-		for i in range(5, xy_col):
-			arr[:,i].fill(self.xy[0][i]) #gender, 9yob, infection
+		arr[:,1].fill(test)
+		arr[:,2].fill(mean)       
+		arr[:,3] = t_window        
+		arr[:,4:] = self.xy[pid_idx,4:] #gender, infection
 		arr_list = list(arr)
 		return arr_list
-			
-
+    
 class data_preprocess:
 	def __init__(self, filename1, filename2, ntopTests, nYob, ntestRel_useRange):
 		self.filename1 = filename1
@@ -167,12 +257,17 @@ class data_preprocess:
 		dataset1 = pd.read_csv(self.filename1, delimiter='\t', encoding='utf-8')
 		dataset1.fillna(0, inplace = True)
 		self.x1 = dataset1.loc[:,['PID', 'Date', 'TestType', 'NumAnswer']]
-		self.x1 = np.array(self.x1)
+		self.x1 = np.array(self.x1) #(504675,4) 909 pid
+		#self.x1 = self.x1[1580:1620,:] #test
+		#self.x1 = self.x1[2010:2050,:] #test convert inf 2/0
+		#self.x1 = self.x1[85944:85994,:] #test convert inf 2/1
+		#self.x1 = self.x1[0:104675,:]
 		
 		dataset2 = pd.read_csv(self.filename2, delimiter='\t', encoding='utf-8')
 		dataset2.fillna(0, inplace = True)
-		self.x2 = dataset2.loc[:,['PID', 'Infection', 't.IndexSurgery', 'Sex', 'YoB']]
+		self.x2 = dataset2.loc[:,['PID', 'Infection', 't.Infection', 't.IndexSurgery', 'Sex', 'YoB']]
 		self.x2 = np.array(self.x2)
+		#pdb.set_trace()
 	
 	def keep_ntopTests(self):
 		#top unique test elements: common blood tests more meaningful
@@ -186,138 +281,136 @@ class data_preprocess:
 		for r1, elem1 in enumerate(self.x1):
 			if(any(elem1[2] == r2[0] for r2 in ntopTests_type)):
 				self.x1new.append(elem1)
-		self.x1new = np.array(self.x1new)
+		self.x1new = np.array(self.x1new) #(404803,4) 907 pid
 		#pdb.set_trace()
 	
 	def combine_datasets(self):
         #combine x1 measurement, x2 metadata
-		self.x1new = np.hstack((self.x1new, np.zeros((self.x1new.shape[0], 4), dtype=self.x1new.dtype)))
+		self.x1new = np.hstack((self.x1new, np.zeros((self.x1new.shape[0], 5), dtype=self.x1new.dtype)))
 		for r1, elem1 in enumerate(self.x1new):
 			r2 = list(self.x2[:,0]).index(elem1[0])
-			self.x1new[r1,4:self.x1new.shape[1]] = self.x2[r2,1:self.x2.shape[1]]	
+			self.x1new[r1,4:] = self.x2[r2,1:] #(404803,9) 907 pid
 		#pdb.set_trace()
 		
-	def delete_infection2(self):
-		self.x1new = pd.DataFrame(self.x1new, columns=['PID', 'Date', 'TestType', 'NumAnswer', 'Infection', 't.IndexSurgery', 'Sex', 'YoB'])
-		self.x1new = self.x1new[self.x1new.Infection != 2]
-		self.x1new = np.array(self.x1new)
+	def convert_infection2(self):
+		self.x1new = pd.DataFrame(self.x1new, columns=['PID', 'Date', 'TestType', 'NumAnswer', 'Infection', 't.Infection', 't.IndexSurgery', 'Sex', 'YoB'])
+		#self.x1new = self.x1new[self.x1new.Infection != 2] #del inf 2
+		self.x1new.Infection = self.x1new.Infection.replace(2,1) #replace 2 with 1
+		self.x1new = np.array(self.x1new) #(404803,9) 907 pid
 		#pdb.set_trace()
 	
-	def create_newDataCol(self):
+	def create_surgery_test_dateCol(self): #col 9 shape(10)
 		#create newDate col (rel minutes) = surgery date - test date
 		self.x1new = np.hstack((self.x1new, np.zeros((self.x1new.shape[0], 1), dtype=self.x1new.dtype)))
 		for i in range(0, len(self.x1new)):
-			surgery_time = (datetime.datetime.strptime(self.x1new[i,5], '%Y-%m-%d %H:%M:%S')).strftime('%d/%m/%y %H:%M')
-			test_surgery_time = datetime.datetime.strptime(surgery_time, '%d/%m/%y %H:%M') - datetime.datetime.strptime(self.x1new[i,1], '%d/%m/%y %H:%M')
+			surgery_time = datetime.strptime(self.x1new[i,6], '%Y-%m-%d %H:%M:%S')
+			test_time = datetime.strptime(self.x1new[i,1], '%d/%m/%y %H:%M')
+			surgery_test_time = surgery_time - test_time
 			#store relative minutes
-			if test_surgery_time.days < 0:
-				test_surgery_time_sec = -1 * test_surgery_time.seconds
+			if surgery_test_time.days < 0:
+				surgery_test_sec = -1 * surgery_test_time.seconds
 			else:
-				test_surgery_time_sec = +1 * test_surgery_time.seconds
-			#pos = test before surgery, neg = test after surgery
-			self.x1new[i,self.x1new.shape[1]-1] = (test_surgery_time.days*DAY_MIN) + test_surgery_time_sec/HR_MIN
+				surgery_test_sec = +1 * surgery_test_time.seconds
+			#pos = test before surgery, neg = test after surgery			
+			self.x1new[i,-1] = (surgery_test_time.days*DAY_MIN) + surgery_test_sec/S_MIN
+		#pdb.set_trace() #(404803, 10) 907 pid
+
+	def create_surgery_infection_dateCol(self): #col 10: only to extract minInfTime shape(11)
+		#create newDate col (rel min) = surgery date - infectiondate
+		self.x1new = np.hstack((self.x1new, np.zeros((self.x1new.shape[0], 1), dtype=self.x1new.dtype)))
+		searchMaxInfTime = []
+		for i in range(0, len(self.x1new)):
+			if self.x1new[i,5] == 0: #handle no infection, time = 0
+				#pdb.set_trace()
+				self.x1new[i,-1] = 0
+			else:				
+				surgery_time = datetime.strptime(self.x1new[i,6], '%Y-%m-%d %H:%M:%S')
+				inf_time = datetime.strptime(self.x1new[i,5], '%Y-%m-%d %H:%M:%S')
+				surgery_inf_time = surgery_time - inf_time
+				searchMaxInfTime.append(surgery_inf_time)
+				#store relative minutes
+				if surgery_inf_time.days < 0:
+					surgery_inf_sec = -1 * surgery_inf_time.seconds
+				else:
+					surgery_inf_sec = +1 * surgery_inf_time.seconds
+				tmp = (surgery_inf_time.days*DAY_MIN) + surgery_inf_sec/S_MIN
+				#check can infection happen on surgery dat: count_tmp=0 not possible
+                #if tmp == 0: count_tmp += 1
+				#pos = inf before surgery, neg = inf after surgery			
+				self.x1new[i,-1] = tmp #(404803, 11) 907 pid
+				#print("TIME ", i, self.x1new[i,10])
 		#pdb.set_trace()
+		minInfTime = min(searchMaxInfTime) 
+		self.rel2 = (minInfTime.days*DAY_MIN) - (minInfTime.seconds/S_MIN) #min
 	
 	def discard_testRelRange(self):
 		if self.ntestRel_useRange:
 			self.xnew = []
-			rel_minRange = REL_DAYRANGE * DAY_MIN
+			patient_drop = []
+			rel1 = REL_DAYRANGE * DAY_MIN #pos=before surgery
+			rel2 = self.rel2 #keep blood tests up to furthest infection time, neg=after surgery
 			for r1, elem1 in enumerate(self.x1new):
-				if(elem1[8] <= rel_minRange and elem1[8] >= -rel_minRange): #time window
+				if(elem1[9] <= rel1 and elem1[9] >= rel2): #time window
 					self.xnew.append(elem1)
-			self.xnew=np.array(self.xnew)
+				else:
+				    patient_drop.append(elem1)
+
+			#pdb.set_trace()
+			self.xnew=np.array(self.xnew) #(64473, 11) 856 pid
+			
+			#investigate patients that are dropped
+			'''patient_drop = np.array(patient_drop)
+			patient_drop_check = check_unique(patient_drop[:,0]) #unique pid drop 745
+			patient_kept = check_unique(self.xnew[:,0]) #unique pid kept 778
+			patient_kept = list(patient_kept)
+			patient_drop_real = []						
+			for r1, elem1 in enumerate(patient_drop): #loop thru each drop pid
+			    if(all(elem1[0] != r2[0] for r2 in patient_kept)):
+			        #pid, testDate, testType, numAns, inf, infDate, surgDate, gen, yob, surg_test_date, surg_inf_date
+			        #print(elem1)
+			        patient_drop_real.append(elem1) 
+			patient_drop_real = np.array(patient_drop_real)
+			if patient_drop_real.shape[0] != 0:
+			    patient_drop_real_check = check_unique(patient_drop_real[:,0]) #51 pid
+			    #i.e.: pid: 137765 closest test date 2004 for surgery 2002
+			else:
+			    print("0 unique pid dropped")'''                  
 		#pdb.set_trace()
 	
-	def create_weightVec_newDataCol(self):
-		#newDate weight_vector
-		#heavier weight when x1new[:,8] smaller
-		self.normc = min(abs(self.xnew[:,8])) #norm constant by newDate
-		test_surgery_time_weight = abs(1/(self.xnew[:,8]/self.normc)) #range[0,1]
-		self.xnew = np.hstack((self.xnew, test_surgery_time_weight.reshape(len(test_surgery_time_weight),1)))
-		#pdb.set_trace()
-
-	def encode_gender(self):
+	def encode_gender(self): #col: 11,12 shape(13)
 		label_encoder = LabelEncoder()
-		gender_integer_encoded = label_encoder.fit_transform(self.xnew[:,6])
-		self.xnew = np.hstack((self.xnew, gender_integer_encoded.reshape(len(gender_integer_encoded),1)))
+		gender_integer_encoded = label_encoder.fit_transform(self.xnew[:,7])
+		gender_onehot_encoded = to_categorical(gender_integer_encoded)
+		self.xnew = np.hstack((self.xnew, gender_onehot_encoded)) #(64473,13) 856 pid
 		#pdb.set_trace()
-		
-	def create_yobGroup(self):
-		min_yob = min(self.xnew[:,7])
-		max_yob = max(self.xnew[:,7])
-		yob_range = np.arange(min_yob, max_yob+self.nYob, self.nYob, dtype=int)
-		#find values in range and replace with integer (group)
-		yob_group = list(self.xnew[:,7])
-		for i in range(0, len(yob_range)-1):
-			yob_group = list(map(lambda x: i if (x>=yob_range[i]) and (x<yob_range[i+1]) else x, yob_group))
-		yob_group[:] = [len(yob_range)-2 if x == max_yob else x for x in yob_group]
-		#yob_compare = (np.array((self.xnew[:,7], np.array(yob_group)))).T.astype(int) #checking
-		#pdb.set_trace()
-		#check_uTable = check_unique(yob_compare[:,1])
-		#print(check_uTable)
-		#yob_integer_encoded = np.array(yob_group)
-		#self.xnew = np.concatenate((self.xnew, yob_integer_encoded.reshape(yob_integer_encoded.shape[0],1)), axis=1)
 
-		#convert yob_group, integer format to one hot encoder
-		yob_onehot_encoded = to_categorical(yob_group)
-		self.xnew = np.concatenate((self.xnew, yob_onehot_encoded), axis=1) #yob tag after
-	
 	def integer_encode_testName(self):
+		#pid, testDate, testType, numAns, inf, infDate, surgDate, gen, yob, surg_test_date, surg_inf_date
 		u, c = np.unique(self.xnew[:,2], return_counts=True) #get unique
 		uc_table = np.asarray((u,c)).T
 		self.xnew = np.array(sorted(self.xnew, key=itemgetter(2)))
+		self.testName_dict = dict(list(enumerate(uc_table[:,0])))
 		idx1 = 0
 		for i in range(0, len(uc_table)):
 			idx2 = uc_table[i,1] + idx1
 			self.xnew[idx1:idx2,2] = i
 			idx1 = idx2
-		return self.xnew
-    
-	def normalize_test(self):
-		u, c = np.unique(self.xnew[:,2], return_counts=True) #get unique
-		uc_table = np.asarray((u,c)).T
-		idx1 = 0
-		for i in range(0, len(uc_table)):
-			idx2 = uc_table[i,1] + idx1
-			sub_xnew = self.xnew[idx1:idx2,3]					
-			if (max(sub_xnew) == 0):
-				idx1 = idx2	      
-			else: #norm to range [-1, 1]
-				sub_xnew_norm = (sub_xnew - np.mean(sub_xnew))/max(sub_xnew)
-				self.xnew[idx1:idx2,3] = sub_xnew_norm
-				idx1 = idx2	
-		return self.xnew    
+		#pdb.set_trace()            
+		return self.xnew #(64473,13) 856 pid
 
 	def result(self):
 		#pdb.set_trace()
 		check = check_unique(self.xnew[:,0])
-		print(check)
+		print(check) #856 pid
 		
 		testName = check_unique(self.xnew[:,2])
-		testName = testName[:,0]
-		
-		'''yearUnique = check_unique(self.xnew[:,11])
-		print("Year Unique: ", yearUnique)
-		yearUnique = yearUnique[:,0]'''
-		
+		testName = testName[:,0] #50
+				
 		#new dataset
-		dfxy_all = pd.DataFrame(self.xnew, columns=['PID', 'Date', 'TestType', 'NumAnswer', 'Infection', \
-                                              't.IndexSurgery', 'Sex', 'YoB', 'newDate', 'newDate_weight', \
-                                              'Gender_encode', 'Yob_intencode1', 'Yob_intencode2', \
-                                              'Yob_intencode3', 'Yob_intencode4', 'Yob_intencode5', \
-                                              'Yob_intencode6', 'Yob_intencode7', 'Yob_intencode8', \
-                                              'Yob_intencode9'])
+		dfxy_all = pd.DataFrame(self.xnew, columns=['PID', 'Date', 'TestType', 'NumAnswer', 'Infection', 't.Infection', 't.IndexSurgery', 'Sex', 'YoB', 'surgery_test_date', 'surgery_inf_date', 'Gender_encode0', 'Gender_encode1'])
+		dfxy = dfxy_all.loc[:,['PID', 'TestType', 'NumAnswer', 'surgery_test_date', 'Gender_encode0', 'Gender_encode1', 'Infection']]
 		
-		dfxy = dfxy_all.loc[:,['PID', 'newDate', 'newDate_weight', 'TestType', 'NumAnswer', 'Gender_encode', \
-                         'Yob_intencode1', 'Yob_intencode2', 'Yob_intencode3', 'Yob_intencode4', \
-                         'Yob_intencode5', 'Yob_intencode6', 'Yob_intencode7', 'Yob_intencode8', \
-                         'Yob_intencode9', 'Infection']]
-		
-        #yob integer encode only
-		'''dfxy_all = pd.DataFrame(self.xnew, columns=['PID', 'Date', 'TestType', 'NumAnswer', 'Infection', 't.IndexSurgery', 'Sex', 'YoB', 'newDate', 'newDate_weight', 'Gender_encode', 'Yob_int'])
-		
-		dfxy = dfxy_all.loc[:,['PID', 'newDate', 'newDate_weight', 'TestType', 'NumAnswer', 'Gender_encode', 'Yob_intencode', 'Infection']]'''
-		return dfxy, self.normc
+		return dfxy, self.rel2, self.testName_dict
 
 
 
