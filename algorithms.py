@@ -4,14 +4,14 @@ mpl.use('Agg')
 import pandas as pd
 import pdb
 from utils import *
-from tensorflow.keras.layers import Dense, Dropout, MaxPooling2D, Flatten, Conv2D
+import tensorflow.keras.backend as K
+import tensorflow as tf
+from tensorflow.keras.layers import Dense, Dropout, GRU
 from tensorflow.keras.models import Sequential
 from sklearn.linear_model import LogisticRegression
 from sklearn.utils.class_weight import compute_class_weight
-import tensorflow.keras.backend as K
-import tensorflow as tf
+from sklearn.dummy import DummyClassifier
 from tensorflow.keras.optimizers import Adam
-from tensorflow.keras.callbacks import Callback
 from sklearn.metrics import f1_score, precision_score, recall_score
 
 #memory calc:
@@ -53,27 +53,31 @@ def kappa(y_true, y_pred):
 	return (observe_acc - exp_acc)/(1-exp_acc)
 	
 
-class CNN:
+class GRUD:
 	"""
-	Convolutional neural network
+	GRU-D implement
 	"""
-	def __init__(self, Xtrain):
+	def __init__(self, Xtrain, ytrain):
 		self.params={'nbatch':32, 'nepoch':40}
 		
+		from tensorflow import set_random_seed
+		np.random.seed(42)
+		set_random_seed(2)
+		
 		self.model = Sequential()
-		self.model.add(Conv2D(32, (3, 3), input_shape=(Xtrain.shape[0], Xtrain.shape[1],1), activation='relu'))
-		self.model.add(MaxPooling2D(pool_size = (2, 2)))
-		self.model.add(Conv2D(32, (3, 3), activation='relu'))
-		self.model.add(MaxPooling2D(pool_size = (2, 2)))
-		self.model.add(Flatten())
-		self.model.add(Dense(units=128, activation='relu'))
-		self.model.add(Dense(units=2, activation='softmax'))
+		self.model.add(GRU(33, return_sequences=True, input_shape=(20,1)))
+		self.model.add(Dropout(0.5))
+		self.model.add(Dense(2, activation = 'softmax'))
 		
 		opt = Adam(lr=0.001)
+		#dont use accuracy metric
 		self.model.compile(optimizer=opt, loss='categorical_crossentropy', metrics=['accuracy', sensitivity, specificity, precision, kappa])
 		
+		
 	def train(self, xtrain, ytrain):
-		self.model.fit(xtrain, ytrain, epochs=self.params['nepoch'], batch_size=self.params['nbatch'], validation_split = 0.2, class_weight=self.class_weights, verbose=2)	
+		history = self.model.fit(xtrain, ytrain, epochs=self.params['nepoch'], batch_size=self.params['nbatch'], validation_split = 0.2, class_weight=self.class_weights, verbose=2)		
+		#history = self.model.fit(xtrain, ytrain, epochs=self.params['nepoch'], batch_size=self.params['nbatch'], validation_data = (xval, yval), class_weight=self.class_weights, verbose=2)		
+		return history
 	
 	def predict(self, xtest):
 		ypred = self.model.predict(xtest)
@@ -83,7 +87,7 @@ class CNN:
 
 class MLP:
 	"""
-	Multilayer perceptron
+	Multilayer perceptron, imputation based
 	"""
 	def __init__(self, Xtrain, ytrain):
 		self.params={'nbatch':32, 'nepoch':40}
@@ -101,15 +105,15 @@ class MLP:
 		set_random_seed(2)
 		
 		self.model = Sequential()
-		self.model.add(Dense(512, activation='relu', input_dim=Xtrain.shape[1]))
+		self.model.add(Dense(256, activation='relu', input_dim=Xtrain.shape[1]))
 		self.model.add(Dropout(0.5))
-		#self.model.add(Dense(64, activation='relu'))
-		#self.model.add(Dropout(0.5))
-		#self.model.add(Dense(16, activation='relu'))
+		self.model.add(Dense(512, activation='relu'))
+		self.model.add(Dropout(0.5))
+		#self.model.add(Dense(512, activation='relu'))
 		#self.model.add(Dropout(0.5))
 		self.model.add(Dense(2, activation='softmax'))
 		
-		opt = Adam(lr=0.01)
+		opt = Adam(lr=0.001)
 		#dont use accuracy metric
 		self.model.compile(optimizer=opt, loss='categorical_crossentropy', metrics=['accuracy', sensitivity, specificity, precision, kappa])
 		
@@ -125,21 +129,39 @@ class MLP:
 		ypred = ypred.argmax(1)
 		return ypred
 
+class Random:
+	"""
+	success rate when simply guessing respecting training class distribution
+	"""
+	def __init__(self):
+		self.model = DummyClassifier(strategy = "stratified", random_state=0)
+	
+	def train(self, xtrain, ytrain):
+		ytrain = ytrain.argmax(1)	
+		self.model.fit(xtrain, ytrain)
+	
+	def predict(self, xtest):
+		ypred = self.model.predict(xtest)
+		#ypred = ypred.argmax(1)
+		return ypred
+		
 class LR:
 	"""
-	Logistic regression
+	Logistic regression, imputation based
 	"""
 	def __init__(self):
 		self.model = LogisticRegression(random_state=0)
 		
 	def train(self, xtrain, ytrain):
+		ytrain = ytrain.argmax(1)
 		self.model.fit(xtrain, ytrain)		
 		#self.model.save("/home/juiwen/Documents/CMPUT659/mp1.h5")
 		#print(self.model.summary())	
 	
 	def predict(self, xtest):
-		ytest = self.model.predict(xtest)
-		return ytest
+		ypred = self.model.predict(xtest)
+		#ypred = ypred.argmax(1)
+		return ypred
 
 
 class snapShot:
