@@ -2,16 +2,17 @@ import numpy as np
 import matplotlib as mpl
 mpl.use('Agg')
 import pandas as pd
+import functools
+from itertools import product
 import pdb
-from utils import *
-from tensorflow.keras.layers import Dense, Dropout, MaxPooling2D, Flatten, Conv2D
+import tensorflow.keras.backend as K
+import tensorflow as tf
+from tensorflow.keras.layers import Dense, Dropout, LSTM
 from tensorflow.keras.models import Sequential
 from sklearn.linear_model import LogisticRegression
 from sklearn.utils.class_weight import compute_class_weight
-import tensorflow.keras.backend as K
-import tensorflow as tf
+from sklearn.dummy import DummyClassifier
 from tensorflow.keras.optimizers import Adam
-from tensorflow.keras.callbacks import Callback
 from sklearn.metrics import f1_score, precision_score, recall_score
 
 #memory calc:
@@ -51,29 +52,54 @@ def kappa(y_true, y_pred):
 	exp_acc2 = ((true_positives+false_negatives)*(true_positives+false_positives)/_all)
 	exp_acc = (exp_acc1 + exp_acc2)/_all
 	return (observe_acc - exp_acc)/(1-exp_acc)
-	
 
-class CNN:
+
+#https://github.com/keras-team/keras/issues/3440
+def w_categorical_crossentropy(y_true, y_pred, weights):
+    nb_cl = len(weights)
+    final_mask = K.zeros_like(y_pred[:, 0])
+    y_pred_max = K.max(y_pred, axis=1)
+    y_pred_max = K.expand_dims(y_pred_max, 1)
+    y_pred_max_mat = K.equal(y_pred, y_pred_max)
+    for c_p, c_t in product(range(nb_cl), range(nb_cl)):
+        final_mask += (K.cast(weights[c_t, c_p],K.floatx()) * K.cast(y_pred_max_mat[:, c_p] ,K.floatx())* K.cast(y_true[:, c_t],K.floatx()))
+    return K.categorical_crossentropy(y_pred, y_true) * final_mask
+    
+
+class nonImpute_LSTM:
 	"""
-	Convolutional neural network
+	LSTM implement
 	"""
-	def __init__(self, Xtrain):
-		self.params={'nbatch':32, 'nepoch':40}
+	def __init__(self, Xtrain, ytrain):
+		self.params={'nbatch':1, 'nepoch':40}
+		self.class_weights = {0:1, 1:4.5}
+		
+		from tensorflow import set_random_seed
+		np.random.seed(42)
+		set_random_seed(2)
 		
 		self.model = Sequential()
-		self.model.add(Conv2D(32, (3, 3), input_shape=(Xtrain.shape[0], Xtrain.shape[1],1), activation='relu'))
-		self.model.add(MaxPooling2D(pool_size = (2, 2)))
-		self.model.add(Conv2D(32, (3, 3), activation='relu'))
-		self.model.add(MaxPooling2D(pool_size = (2, 2)))
-		self.model.add(Flatten())
-		self.model.add(Dense(units=128, activation='relu'))
-		self.model.add(Dense(units=2, activation='softmax'))
+		#input_shape = 684 xtrain, 20 tests, variable time
+		#data = data.reshape(684, 20, variableTime)
+		self.model.add(LSTM(50, return_sequences=True, activation='relu', input_shape=(None,60)))
+		#self.model.add(Dropout(0.5))
+		#self.model.add(LSTM(100, return_sequences=True, activation='relu'))
+		#self.model.add(Dropout(0.5))
+		#self.model.add(LSTM(100, return_sequences=False, activation='relu'))
+		#self.model.add(Dropout(0.5))
+		self.model.add(Dense(2, activation='softmax'))
+		
+		w_array = np.ones((2,2))
+		w_array[1, 0] = 1.2 #cost when 1 is misclassified as 0
+		ncce = functools.partial(w_categorical_crossentropy, weights=w_array)
 		
 		opt = Adam(lr=0.001)
-		self.model.compile(optimizer=opt, loss='categorical_crossentropy', metrics=['accuracy', sensitivity, specificity, precision, kappa])
+		self.model.compile(optimizer=opt, loss=ncce, metrics=['accuracy', sensitivity, specificity, precision, kappa])
 		
-	def train(self, xtrain, ytrain):
-		self.model.fit(xtrain, ytrain, epochs=self.params['nepoch'], batch_size=self.params['nbatch'], validation_split = 0.2, class_weight=self.class_weights, verbose=2)	
+	def train(self, xtrain, ytrain):		
+		history = self.model.fit(xtrain, ytrain, epochs=self.params['nepoch'], batch_size=self.params['nbatch'], validation_split = 0.2, verbose=2)		
+		#history = self.model.fit(xtrain, ytrain, epochs=self.params['nepoch'], batch_size=self.params['nbatch'], validation_data = (xval, yval), class_weight=self.class_weights, verbose=2)		
+		return history
 	
 	def predict(self, xtest):
 		ypred = self.model.predict(xtest)
@@ -83,11 +109,11 @@ class CNN:
 
 class MLP:
 	"""
-	Multilayer perceptron
+	Multilayer perceptron, imputation based
 	"""
 	def __init__(self, Xtrain, ytrain):
 		self.params={'nbatch':32, 'nepoch':40}
-		
+				
 		#make classifier aware of imbalance data by incorp weight in cost fxn
 		#self.class_weights = {0:0.4,1:0.6} #sum to 1 else change reg param
 		self.class_weights = {0:1, 1:4.5} #class 1 3.65 times weight of class 0
@@ -101,16 +127,15 @@ class MLP:
 		set_random_seed(2)
 		
 		self.model = Sequential()
-		self.model.add(Dense(512, activation='relu', input_dim=Xtrain.shape[1]))
+		self.model.add(Dense(256, activation='relu', input_dim=Xtrain.shape[1]))
 		self.model.add(Dropout(0.5))
-		#self.model.add(Dense(64, activation='relu'))
-		#self.model.add(Dropout(0.5))
-		#self.model.add(Dense(16, activation='relu'))
+		self.model.add(Dense(512, activation='relu'))
+		self.model.add(Dropout(0.5))
+		#self.model.add(Dense(512, activation='relu'))
 		#self.model.add(Dropout(0.5))
 		self.model.add(Dense(2, activation='softmax'))
 		
-		opt = Adam(lr=0.01)
-		#dont use accuracy metric
+		opt = Adam(lr=0.001)
 		self.model.compile(optimizer=opt, loss='categorical_crossentropy', metrics=['accuracy', sensitivity, specificity, precision, kappa])
 		
 		
@@ -125,21 +150,39 @@ class MLP:
 		ypred = ypred.argmax(1)
 		return ypred
 
-class LR:
+class Random:
 	"""
-	Logistic regression
+	success rate when simply guessing respecting training class distribution
 	"""
 	def __init__(self):
-		self.model = LogisticRegression(random_state=0)
+		self.model = DummyClassifier(strategy = "stratified", random_state=0)
+	
+	def train(self, xtrain, ytrain):
+		ytrain = ytrain.argmax(1)	
+		self.model.fit(xtrain, ytrain)
+	
+	def predict(self, xtest):
+		ypred = self.model.predict(xtest)
+		#ypred = ypred.argmax(1)
+		return ypred
+		
+class LR:
+	"""
+	Logistic regression, imputation based
+	"""
+	def __init__(self):
+		self.model = LogisticRegression(random_state=42)
 		
 	def train(self, xtrain, ytrain):
+		ytrain = ytrain.argmax(1)
 		self.model.fit(xtrain, ytrain)		
 		#self.model.save("/home/juiwen/Documents/CMPUT659/mp1.h5")
 		#print(self.model.summary())	
 	
 	def predict(self, xtest):
-		ytest = self.model.predict(xtest)
-		return ytest
+		ypred = self.model.predict(xtest)
+		#ypred = ypred.argmax(1)
+		return ypred
 
 
 class snapShot:
