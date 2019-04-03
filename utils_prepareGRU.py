@@ -30,9 +30,53 @@ class prepareData_GRUD:
 	put value at time interval
 	"""
 	def __init__(self, xy, ntopTests):
-		self.xy = np.array(xy)
+		self.xyold = np.array(xy)
 		self.ntopTests = ntopTests
 	
+	def upSample(self, has_inf, hasnot_inf):
+		#pdb.set_trace()
+		i_hasinf = np.where(self.xyold[:,-1]==1)[0]
+		xy_inf = self.xyold[i_hasinf, :]
+		num_inf = check_unique(xy_inf[:,0])
+		assert num_inf.shape[0] == has_inf, "Error: incorrect number of infection1"
+		
+		N = hasnot_inf - has_inf
+		pid_inf = num_inf[:,0]		
+		pid_hasinfus = np.random.choice(pid_inf, size=int(N), replace=True)
+		xy_us = []
+		for i in range(0, N):
+			print("upsampled pid", i)
+			xypid_ustmp = [x for x in list(xy_inf) if x[0] == pid_hasinfus[i]]
+			xypid_us = copy.deepcopy(xypid_ustmp)
+			#pdb.set_trace()
+			noise = np.random.normal(0, 0.05, len(xypid_us))
+			#indicator of dup pid by *1000 since can't use string
+			for j in range(0, len(xypid_us)):
+				xypid_us[j][0] = xypid_us[j][0]*(1000+i)
+				xypid_us[j][2] = xypid_us[j][2] + noise[j]
+				
+			#pdb.set_trace()
+			xy_us.append(xypid_us)
+		#pdb.set_trace()
+		
+		xy_arrus = np.array(xy_us[0]) #upsample arr
+		for i in range(1, N):
+			tmp = np.array(xy_us[i])
+			print("tmp, arr", len(tmp), xy_arrus.shape)
+			xy_arrus = np.vstack([xy_arrus, tmp])
+		
+		#pdb.set_trace()		
+		xy_arrus = np.vstack([xy_arrus, xy_inf]) #us + orig_inf
+		num_inf = check_unique(xy_arrus[:,0])
+		assert num_inf.shape[0] == hasnot_inf, "Error: incorrect number of infection2"
+		
+		i_hasnotinf = np.where(self.xyold[:,-1]==0)[0]
+		xy_arrus = np.vstack([xy_arrus, self.xyold[i_hasnotinf, :]])
+		num_inf_noinf = check_unique(xy_arrus[:,0])
+		assert num_inf_noinf.shape[0] == hasnot_inf + hasnot_inf, "Error: incorrect total"
+		pdb.set_trace()
+		self.xy = xy_arrus
+		
 	def time_watcher(self, arr, start_idx):
 		#return indices of changes in time
 		run = True
@@ -52,20 +96,20 @@ class prepareData_GRUD:
 		if diff_len < 0:
 			raise AttributeError("Length error list too long")
 		return list_ + [np.nan] * diff_len
+		
 	
 	def split_standardize(self, x, y, is_nan):
 		#stratify: preserves 21% ones and 79% zeros in y
 		indices = np.arange(len(y))
-		#make (patient, time, tests)
 		xnew=[]
 		for i in range(0, len(x)):
 			tmp = np.array(x[i])
-			tmp = np.transpose(tmp) #ROW=time, COL=fix num tests
+			tmp = np.transpose(tmp)
 			print("split shape", tmp.shape)
 			xnew.append(tmp)
 
 		pdb.set_trace()
-		xnew = np.array(xnew)
+		xnew = np.array(xnew) #(1346, vary, 20)
 		Xtrain, Xtest, ytrain, ytest, train_indices, test_indices = train_test_split(xnew, y, indices, test_size=0.2, random_state=42, stratify=y) 
 			     
 		sc_X = StandardScaler() #standardize data
@@ -73,7 +117,7 @@ class prepareData_GRUD:
 			for i in range(0, Xtrain.shape[0]):
 				if np.isnan(np.nanmin(Xtrain[i])): #all_nan
 					#pdb.set_trace()
-					print("replace all with 0")
+					print("replace all with 0") #replace nan with 0
 					tmp = Xtrain[i]
 					tmp[np.isnan(tmp)]=0
 					pass #dont standardize
@@ -127,7 +171,7 @@ class prepareData_GRUD:
 			match = [x for x in list(self.xy) if x[0] == elem1]
 			match_time = np.array(sorted(match, key=itemgetter(3), reverse=True))
 			match_test = np.array(sorted(match_time, key=itemgetter(1), reverse=False))
-			#print(match_test)
+			
 			start_idx = 0
 			end_idx = 0
 			x = []
@@ -186,17 +230,20 @@ class prepareData_GRUD:
 			self.x.append(x)
 			self.time.append(time)
 			
-			for i in range(0, len(self.x)): #debug: get 20 rows
-				tmp = np.array(self.x[i])
-				tmp2 = np.array(self.time[i])
-				print("shape", tmp.shape, tmp2.shape)
-			print("                           ")
-				
 			self.y.append(match_test[0][6])
-		
+			
+		for i in range(0, len(self.x)): #debug: get 20 rows
+			tmp = np.array(self.x[i])
+			tmp2 = np.array(self.time[i])
+			assert tmp.shape[0] == 20, "Error in x shape"
+			assert tmp2.shape[0] == 20, "Error in time shape"
+			print("shape", tmp.shape, tmp2.shape)
+		print("                           ")		
+	
 		pdb.set_trace()
 		Xtrain, ytrain, Xtest, ytest = self.split_standardize(self.x, self.y, is_nan=1)	
 		return Xtrain, ytrain, Xtest, ytest #feed rows into GRU
+		
 	
 	def create_mask(self):
 		self.mask=[]
@@ -237,23 +284,24 @@ class prepareData_GRUD:
 		pdb.set_trace()
 		Xtrain, ytrain, Xtest, ytest = self.split_standardize(self.delta, self.y, is_nan=1)
 		return Xtrain, Xtest
-			
+
 	def create_input(self, Xtrain_GRUDX, Xtest_GRUDX, Xtrain_GRUDM, Xtest_GRUDM, Xtrain_GRUDD, Xtest_GRUDD):
 		#create long vectors by concatenate rows from [x,m,d]
 		xmdtrain=[]
 		xmdtest=[]
 		for i in range(0, len(Xtrain_GRUDX)):
 			xmdtrain_row = np.hstack([Xtrain_GRUDX[i], Xtrain_GRUDM[i], Xtrain_GRUDD[i]])
-			xmdtrain_row = np.transpose(xmdtrain_row)
 			xmdtrain.append(xmdtrain_row)
 			
 		for i in range(0, len(Xtest_GRUDX)):
 			xmdtest_row = np.hstack([Xtest_GRUDX[i], Xtest_GRUDM[i], Xtest_GRUDD[i]])
-			xmdtest_row = np.transpose(xmdtest_row)
 			xmdtest.append(xmdtest_row)
 		pdb.set_trace()
 		return xmdtrain, xmdtest
-	
+		
+#######################################################################################
+
+
 '''class prepareData_GRUDold:
 	"""
 	create/combine x, mask and time interval vector

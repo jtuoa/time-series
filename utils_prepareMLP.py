@@ -32,8 +32,13 @@ class prepareData_MLP:
 	def xy_output(self, x_simple, y_simple, is_3D):
 		#pdb.set_trace()
 		#stratify: preserves 21% ones and 79% zeros in y_simple
-		Xtrain, Xtest, ytrain, ytest = train_test_split(x_simple, y_simple, test_size=0.2, random_state=42, stratify=y_simple) 
-                
+		indices = np.arange(len(y_simple))
+		Xtrain, Xtest, ytrain, ytest, train_indices, test_indices = train_test_split(x_simple, y_simple, indices, test_size=0.2, random_state=42, stratify=y_simple)
+		
+		#pdb.set_trace()
+		#np.save('train_indices.npy', train_indices)
+		#np.save('test_indices.npy', test_indices)
+        
 		sc_X = StandardScaler() #standardize data
 		if is_3D == 1:
 			for p in range(0, Xtrain.shape[0]):
@@ -41,9 +46,23 @@ class prepareData_MLP:
 			for p in range(0, Xtest.shape[0]):
 				Xtest[p] = sc_X.fit_transform(Xtest[p])
 		elif is_3D == 0:
-			Xtrain = sc_X.fit_transform(Xtrain)
-			Xtest = sc_X.transform(Xtest)	
-        		
+			Xtrain = (Xtrain - np.nanmean(Xtrain))/np.nanstd(Xtrain)
+			Xtest = (Xtest - np.nanmean(Xtest))/np.nanstd(Xtest)
+			#Xtrain = sc_X.fit_transform(Xtrain)
+			#Xtest = sc_X.transform(Xtest)
+		
+		Xtrain_mean, Xtrain_std = np.nanmean(Xtrain), np.nanstd(Xtrain)
+		Xtest_mean, Xtest_std = np.nanmean(Xtest), np.nanstd(Xtest)
+		print("Xtrain_mean, std, Xtest_mean, std", Xtrain_mean, Xtrain_std, Xtest_mean, Xtest_std)
+		
+		Xtrain[np.isnan(Xtrain)]=0
+		Xtest[np.isnan(Xtest)]=0
+		Xtrain_mean, Xtrain_std = np.mean(Xtrain), np.std(Xtrain)
+		Xtest_mean, Xtest_std = np.mean(Xtest), np.std(Xtest)
+		print("Xtrain_mean, std, Xtest_mean, std", Xtrain_mean, Xtrain_std, Xtest_mean, Xtest_std)
+		
+		pdb.set_trace()
+		
 		return Xtrain, ytrain, Xtest, ytest  
 
 	def xy_freq(self):
@@ -61,6 +80,7 @@ class prepareData_MLP:
 		#nc = nc + 2 #add encode gender col
 		x_simple = np.zeros((nr, nc))
 		y_simple = np.zeros((nr,1))
+		x_pid = np.zeros((nr,1))
 		i = 0 #thru pid
 		for r in range(0,nr):
 			print("pid", i)
@@ -78,11 +98,13 @@ class prepareData_MLP:
 			#pdb.set_trace()			           
 			#x_simple[r, -2:] = self.data[i][0][0,[4,5]] #include gender col
 			y_simple[r] = self.data[i][0][0,-1] #infection per pid
+			x_pid[r] = self.data[i][0][0,0]
 			i += 1 #each row = next pid
             
 		pdb.set_trace()
 		print(x_simple.shape, y_simple.shape)		
 		Xtrain, ytrain, Xtest, ytest = self.xy_output(x_simple, y_simple, 0) #1=3D arr
+		#np.save('xpid.npy', x_pid)
 		return Xtrain, ytrain, Xtest, ytest
 
 	def conv_xy_simple(self, test_num):

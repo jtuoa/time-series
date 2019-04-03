@@ -14,7 +14,7 @@ import copy
 
 DAY_MIN = 1440
 S_MIN = 60
-REL_DAYRANGE = 60 #day prior knowledge 60, 0
+REL_DAYRANGE = 0 #60 #day prior knowledge 60, POSTOPERATIVE = 0
 
 
 def check_unique(arr):

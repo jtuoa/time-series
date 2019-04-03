@@ -88,7 +88,8 @@ class impute_preprocess:
 					#find mean all pid based on inf
 					pid_inf_idx = np.where(self.xy[:,0] == elem1)[0][0] #inf same for all test
 					pid_inf = self.xy[pid_inf_idx,-1]
-					mean = self.mean_perTest(elem2, pid_inf) 
+					#mean = self.mean_perTest(elem2, pid_inf)
+					mean = np.nan
 					non_impute = self.create_nonImpute_list(pid_inf_idx, elem1, elem2, t_window, mean)
 					#non_impute = self.dateWeightVector(non_impute, t_window) #mult weight
 					count_impTest = self.nSamples
@@ -134,8 +135,9 @@ class impute_preprocess:
 	def impute_MEAN_bTest(self, arr, t_window):
 		arr = np.array(sorted(arr, key=itemgetter(3), reverse=True))
 		pid_inf = arr[0,-1]
-		testName = arr[0,1]	
-		mean = self.mean_perTest(testName, pid_inf)
+		testName = arr[0,1]		
+		#mean = self.mean_perTest(testName, pid_inf)
+		mean = self.mean(testName)
 		t_window = np.array(t_window)
 		slist_mean_impute = []
 		start_idx = 0
@@ -231,9 +233,18 @@ class impute_preprocess:
 		return slist_nn_impute, count_impTest
 		
     #Fill by: mean over all pid for pid with no measurements in testA
-	def mean_perTest(self, test, has_inf):
+	'''def mean_perTest(self, test, has_inf):
 		#compute mean across all patients for test based on pid infection
 		match = [x for x in list(self.xy) if x[1] == test and x[-1] == has_inf]
+		match_arr = np.array(match)
+		if len(match_arr) == 0:
+			mean = 0
+		else:
+			mean = np.sum(match_arr[:,2])/match_arr.shape[0]
+		return mean'''
+	
+	def mean(self, test):
+		match = [x for x in list(self.xy) if x[1] == test]
 		match_arr = np.array(match)
 		if len(match_arr) == 0:
 			mean = 0

@@ -48,6 +48,7 @@ class frequency_bTest:
 				match = [x for x in list(self.xy) if x[1] == elem2 and x[0] == elem1]
 				freq = len(match)
 				testfreq_list.append(freq)
+			#pdb.set_trace()
 			pid_inf_idx = np.where(self.xy[:,0] == elem1)[0][0]
 			pid_inf = self.xy[pid_inf_idx,-1]
 			testfreq_list.append(pid_inf)
